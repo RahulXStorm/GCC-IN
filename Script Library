@@ -1,1 +1,174 @@
+# ================================
+# Stop Services + Kill Process + Close Sessions/Open Files + Log Off Users
+# on csc2cwn00004302.cloud.kp.org Server and Send Report
+# ================================
+
+# --- Config ---
+$server      = "csc2cwn00004302.cloud.kp.org"
+$SmtpServer  = "mta.kp.org"
+$date        = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+
+# Define the services to stop
+$services = @(
+    "tws_maestro_tws",
+    "tws_netman_tws",
+    "tws_ssm_agent_tws",
+    "tws_tokensrv_tws",
+    "SSHTectiaServer"
+)
+
+# --- Collect stop results ---
+$results = foreach ($service in $services) {
+    try {
+        Invoke-Command -ComputerName $server -ScriptBlock {
+            param($svc)
+            Stop-Service -Name $svc -Force -ErrorAction Stop
+        } -ArgumentList $service
+
+        [PSCustomObject]@{
+            Action    = "Service Stop"
+            Target    = $service
+            Status    = "Stopped Successfully"
+            Timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        }
+    }
+    catch {
+        [PSCustomObject]@{
+            Action    = "Service Stop"
+            Target    = $service
+            Status    = "Failed - $($_.Exception.Message)"
+            Timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        }
+    }
+}
+
+# --- Kill ssh-broker-g3.exe process ---
+try {
+    Invoke-Command -ComputerName $server -ScriptBlock {
+        Get-Process -Name "ssh-broker-g3" -ErrorAction SilentlyContinue | Stop-Process -Force
+    }
+    $results += [PSCustomObject]@{
+        Action    = "Process Kill"
+        Target    = "ssh-broker-g3.exe"
+        Status    = "Terminated Successfully"
+        Timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    }
+}
+catch {
+    $results += [PSCustomObject]@{
+        Action    = "Process Kill"
+        Target    = "ssh-broker-g3.exe"
+        Status    = "Failed - $($_.Exception.Message)"
+        Timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    }
+}
+
+# --- Close Sessions and Open Files ---
+try {
+    Invoke-Command -ComputerName $server -ScriptBlock {
+        # Close all SMB sessions
+        Get-SmbSession | ForEach-Object { Close-SmbSession -SessionId $_.SessionId -Force }
+
+        # Close all open files
+        Get-SmbOpenFile | ForEach-Object { Close-SmbOpenFile -FileId $_.FileId -Force }
+    }
+    $results += [PSCustomObject]@{
+        Action    = "SMB Cleanup"
+        Target    = "Sessions + Open Files"
+        Status    = "Closed Successfully"
+        Timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    }
+}
+catch {
+    $results += [PSCustomObject]@{
+        Action    = "SMB Cleanup"
+        Target    = "Sessions + Open Files"
+        Status    = "Failed - $($_.Exception.Message)"
+        Timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    }
+}
+
+# --- Log off all user sessions ---
+try {
+    Invoke-Command -ComputerName $server -ScriptBlock {
+        $sessions = quser 2>$null | Select-Object -Skip 1
+        foreach ($line in $sessions) {
+            $parts = $line -split '\s+'
+            $sessionId = $parts[2]  # Usually Session ID is the 3rd column
+            if ($sessionId -match '^\d+$') {
+                logoff $sessionId /server:$env:COMPUTERNAME
+            }
+        }
+    }
+    $results += [PSCustomObject]@{
+        Action    = "User Logoff"
+        Target    = "All interactive users"
+        Status    = "Logged Off Successfully"
+        Timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    }
+}
+catch {
+    $results += [PSCustomObject]@{
+        Action    = "User Logoff"
+        Target    = "All interactive users"
+        Status    = "Failed - $($_.Exception.Message)"
+        Timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    }
+}
+
+# --- Convert results to HTML table with styling ---
+$tableStyle = @"
+<style>
+    table {
+        border-collapse: collapse;
+        width: 100%;
+        font-family: Arial, sans-serif;
+        font-size: 13px;
+    }
+    th, td {
+        border: 1px solid #dcdcdc;
+        padding: 8px;
+        text-align: left;
+    }
+    th {
+        background-color: #0078D7;
+        color: white;
+    }
+    tr:nth-child(even) {
+        background-color: #f9f9f9;
+    }
+    tr:hover {
+        background-color: #f1f1f1;
+    }
+</style>
+"@
+
+$servicesHtml = $results | ConvertTo-Html -Fragment -As Table -PreContent "<h3>Stop Report ($server)</h3>"
+
+# --- Build email body ---
+$sendMailMessageSplat = @{
+    From       = "noreply@yourdomain.com"
+    To         = "team@yourdomain.com"
+    Cc         = "manager@yourdomain.com"
+    Subject    = "MB Service Stop Report - $date"
+    SmtpServer = $SmtpServer
+    Body       = @"
+<html>
+<head>
+    $tableStyle
+</head>
+<body style='font-family: Arial, sans-serif;'>
+    <p>Hi Team,</p>
+    <p>Please find below the detailed <strong>stop report</strong> for the <strong>MB Application</strong> on server <strong>$server</strong>.</p>
+    $servicesHtml
+    <p>Thank you,<br/>Automation Script</p>
+</body>
+</html>
+"@
+}
+
+# --- Send email ---
+Send-MailMessage @sendMailMessageSplat -BodyAsHtml
+
+Write-Host "✅ Email sent with stop report for $server"
 
